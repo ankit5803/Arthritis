@@ -1,46 +1,23 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
 from tqdm import tqdm
-from torch.utils.data import DataLoader
 
-from dataset import (
-    KneeDataset,
-    train_transform,
-    val_transform
-)
-
-from model import KneeModel
-
-
-device = torch.device("cuda")
-
-
-train_dataset = KneeDataset(
-    "./dataset/train",
-    train_transform
-)
-
-val_dataset = KneeDataset(
-    "./dataset/val",
-    val_transform
+from src.model import KneeOAModel
+from src.dataloader import (
+    train_loader,
+    val_loader
 )
 
 
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=16,
-    shuffle=True
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
 )
 
-val_loader = DataLoader(
-    val_dataset,
-    batch_size=16
-)
+print("Using:", device)
 
 
-model = KneeModel().to(device)
+model = KneeOAModel().to(device)
 
 
 criterion = nn.CrossEntropyLoss(
@@ -49,17 +26,27 @@ criterion = nn.CrossEntropyLoss(
 
 
 optimizer = optim.AdamW(
-
     model.parameters(),
-
-    lr=1e-4
+    lr=1e-4,
+    weight_decay=1e-4
 )
 
 
-best_acc = 0
+scheduler = optim.lr_scheduler.CosineAnnealingLR(
+    optimizer,
+    T_max=50
+)
 
 
-for epoch in range(40):
+scaler = torch.amp.GradScaler("cuda")
+
+
+best_val_acc = 0
+patience = 6
+counter = 0
+
+
+for epoch in range(50):
 
     model.train()
 
@@ -67,43 +54,45 @@ for epoch in range(40):
     total = 0
     loss_sum = 0
 
-
     progress = tqdm(train_loader)
 
-
-    for images,labels in progress:
+    for images, labels in progress:
 
         images = images.to(device)
         labels = labels.to(device)
 
         optimizer.zero_grad()
 
-        outputs = model(images)
+        with torch.amp.autocast("cuda"):
 
-        loss = criterion(
-            outputs,
-            labels
-        )
+            outputs = model(images)
 
-        loss.backward()
+            loss = criterion(
+                outputs,
+                labels
+            )
 
-        optimizer.step()
+        scaler.scale(loss).backward()
+
+        scaler.step(optimizer)
+
+        scaler.update()
 
         loss_sum += loss.item()
 
-        _,pred = torch.max(
-            outputs,
+        _, predicted = torch.max(
+            outputs.data,
             1
         )
 
         total += labels.size(0)
 
         correct += (
-            pred==labels
+            predicted == labels
         ).sum().item()
 
 
-    train_acc = 100*correct/total
+    train_acc = 100 * correct / total
 
 
     model.eval()
@@ -111,43 +100,56 @@ for epoch in range(40):
     val_correct = 0
     val_total = 0
 
-
     with torch.no_grad():
 
-        for images,labels in val_loader:
+        for images, labels in val_loader:
 
             images = images.to(device)
             labels = labels.to(device)
 
             outputs = model(images)
 
-            _,pred = torch.max(
-                outputs,
+            _, predicted = torch.max(
+                outputs.data,
                 1
             )
 
             val_total += labels.size(0)
 
             val_correct += (
-                pred==labels
+                predicted == labels
             ).sum().item()
 
 
-    val_acc = 100*val_correct/val_total
+    val_acc = 100 * val_correct / val_total
+
+    scheduler.step()
+
+    print("\nEpoch", epoch + 1)
+    print("Train:", train_acc)
+    print("Val:", val_acc)
 
 
-    print("\nEpoch",epoch+1)
-    print("Train:",train_acc)
-    print("Val:",val_acc)
+    if val_acc > best_val_acc:
 
-
-    if val_acc > best_acc:
-
-        best_acc = val_acc
+        best_val_acc = val_acc
 
         torch.save(
             model.state_dict(),
             "best_model.pth"
         )
 
+        counter = 0
+
         print("saved")
+
+    else:
+
+        counter += 1
+
+
+    if counter >= patience:
+
+        print("Early stopping")
+
+        break
