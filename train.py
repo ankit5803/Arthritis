@@ -1,107 +1,153 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
-from src.model import KneeOACNN
-from src.dataloader import train_loader, val_loader
+from tqdm import tqdm
+from torch.utils.data import DataLoader
 
-
-# DEVICE
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
+from dataset import (
+    KneeDataset,
+    train_transform,
+    val_transform
 )
 
-print("Using device:", device)
+from model import KneeModel
 
 
-# MODEL
-model = KneeOACNN().to(device)
+device = torch.device("cuda")
 
 
-# LOSS FUNCTION
-criterion = nn.CrossEntropyLoss()
+train_dataset = KneeDataset(
+    "./dataset/train",
+    train_transform
+)
+
+val_dataset = KneeDataset(
+    "./dataset/val",
+    val_transform
+)
 
 
-# OPTIMIZER
-optimizer = torch.optim.Adam(
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=16,
+    shuffle=True
+)
+
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=16
+)
+
+
+model = KneeModel().to(device)
+
+
+criterion = nn.CrossEntropyLoss(
+    label_smoothing=0.1
+)
+
+
+optimizer = optim.AdamW(
+
     model.parameters(),
-    lr=0.001
+
+    lr=1e-4
 )
 
 
-# EPOCHS
-epochs = 20
+best_acc = 0
 
 
-for epoch in range(epochs):
+for epoch in range(40):
 
-    print(f"\nEpoch {epoch+1}/{epochs}")
-
-    # TRAIN MODE
     model.train()
 
-    running_loss = 0
     correct = 0
     total = 0
+    loss_sum = 0
 
 
-    for images, labels in train_loader:
+    progress = tqdm(train_loader)
+
+
+    for images,labels in progress:
 
         images = images.to(device)
-
         labels = labels.to(device)
 
-
-        # clear old gradients
         optimizer.zero_grad()
 
-
-        # forward pass
         outputs = model(images)
 
-
-        # calculate loss
         loss = criterion(
             outputs,
             labels
         )
 
-
-        # backprop
         loss.backward()
 
-
-        # update weights
         optimizer.step()
 
+        loss_sum += loss.item()
 
-        running_loss += loss.item()
-
-
-        # predictions
-        _, predicted = torch.max(
+        _,pred = torch.max(
             outputs,
             1
         )
 
-
         total += labels.size(0)
 
         correct += (
-            predicted == labels
+            pred==labels
         ).sum().item()
 
 
-    train_accuracy = (
-        100 * correct / total
-    )
+    train_acc = 100*correct/total
 
 
-    print(
-        "Loss:",
-        running_loss
-    )
+    model.eval()
 
-    print(
-        "Train Accuracy:",
-        train_accuracy
-    )
+    val_correct = 0
+    val_total = 0
+
+
+    with torch.no_grad():
+
+        for images,labels in val_loader:
+
+            images = images.to(device)
+            labels = labels.to(device)
+
+            outputs = model(images)
+
+            _,pred = torch.max(
+                outputs,
+                1
+            )
+
+            val_total += labels.size(0)
+
+            val_correct += (
+                pred==labels
+            ).sum().item()
+
+
+    val_acc = 100*val_correct/val_total
+
+
+    print("\nEpoch",epoch+1)
+    print("Train:",train_acc)
+    print("Val:",val_acc)
+
+
+    if val_acc > best_acc:
+
+        best_acc = val_acc
+
+        torch.save(
+            model.state_dict(),
+            "best_model.pth"
+        )
+
+        print("saved")
